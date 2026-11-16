@@ -1384,7 +1384,6 @@ const contrast = byId('contrast');
 const synth = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window ? window.speechSynthesis : null;
 let current = 0;
 let utterance = null;
-let voices = [];
 
 let followSelections = false;
 const Audio = window.AudioContext || window.webkitAudioContext;
@@ -1647,42 +1646,45 @@ function browserVoiceOrder() {
   return 'device';
 }
 
+function spanishSpainVoices() {
+  return synth?.getVoices().filter(item => /^es[-_]ES$/i.test(item.lang)) || [];
+}
+
 function googleSpanishVoice() {
-  const spanish = synth?.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang) && /google/i.test(item.name)) || [];
-  return spanish.find(item => /^es[-_]ES$/i.test(item.lang)) || spanish[0];
+  return spanishSpainVoices().find(item => /google/i.test(item.name));
 }
 
 function deviceVoice() {
-  const spanish = synth?.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang)) || [];
-  const local = spanish.filter(item => item.localService);
-  return local.find(item => item.default)
-    || local.find(item => /^es[-_]ES$/i.test(item.lang))
-    || local[0]
-    || spanish.find(item => item.default);
+  const device = spanishSpainVoices().filter(item => !/google/i.test(item.name));
+  return device.find(item => item.localService && item.default)
+    || device.find(item => item.localService)
+    || device.find(item => item.default);
 }
 
 function loadVoices() {
-  voices = synth.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang))
-    .sort((a,b) => a.name.localeCompare(b.name));
-  const automatic = deviceVoice();
+  const google = googleSpanishVoice();
+  const device = deviceVoice();
+  const googleOption = new Option(google ? 'Google Español' : 'Google Español · No disponible', 'google');
+  googleOption.disabled = !google;
   voice.replaceChildren(
     new Option({
       chrome:'Automática · Google Español → Dispositivo → Piper',
       safari:'Automática · Piper → Dispositivo',
       device:'Automática · Dispositivo → Piper'
     }[browserVoiceOrder()], ''),
-    new Option(piperLabels.piper, 'piper'),
-    new Option(automatic ? 'Dispositivo · ' + automatic.name : 'Voz automática del dispositivo', 'device')
+    googleOption,
+    new Option(device ? 'Dispositivo · ' + device.name : 'Voz del dispositivo', 'device'),
+    new Option(piperLabels.piper, 'piper')
   );
-  const google = googleSpanishVoice();
-  if (google && !voices.some(item => item.voiceURI === google.voiceURI)) voices.push(google);
-  voices.forEach(item => voice.add(new Option(item.name + ' · ' + item.lang, item.voiceURI)));
-  restoreSelect(voice, preferredVoice);
+  const primary = [google?.voiceURI, device?.voiceURI];
+  spanishSpainVoices().filter(item => item.localService && !primary.includes(item.voiceURI))
+    .sort((a,b) => a.name.localeCompare(b.name))
+    .forEach(item => voice.add(new Option(item.name + ' · es-ES', item.voiceURI)));
+  const selected = [...voice.options].find(option => option.value === preferredVoice && !option.disabled);
+  if (selected) voice.value = selected.value;
 }
-if (synth) {
-  loadVoices();
-  synth.addEventListener('voiceschanged', loadVoices);
-}
+loadVoices();
+synth?.addEventListener('voiceschanged', loadVoices);
 
 function speakDevice(queue, selected, fallback) {
   function readNext() {
@@ -1750,7 +1752,9 @@ function speakQueue(queue) {
     });
     return;
   }
-  const selected = synth?.getVoices().find(item => item.voiceURI === voice.value) || deviceVoice();
+  const selected = voice.value === 'device' ? deviceVoice()
+    : voice.value === 'google' ? googleSpanishVoice()
+    : spanishSpainVoices().find(item => item.localService && item.voiceURI === voice.value);
   if (selected) speakDevice(queue, selected);
   else if (voice.value === 'device') speakPiper(queue);
   else status.textContent = 'La voz elegida no está disponible.';
