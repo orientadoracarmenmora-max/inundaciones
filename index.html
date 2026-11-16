@@ -1385,16 +1385,12 @@ const synth = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in windo
 let current = 0;
 let utterance = null;
 let voices = [];
-let googleVoice;
+
 let followSelections = false;
 const Audio = window.AudioContext || window.webkitAudioContext;
 const canUsePiper = Boolean(Audio && window.Worker && window.WebAssembly && window.isSecureContext && location.protocol !== 'file:');
 let audioContext, piperWorker, piperUrl, piperJob;
-let piperReady = false;
-let activePiperVoice;
-let piperLoadTimer;
 const piperLabels = { piper: 'Piper Sharvard · Segunda voz' };
-let preparedSpeech;
 let nextPiperRequest = 0;
 const sharvardState = byId('sharvard-state');
 const download = byId('voice-download');
@@ -1404,61 +1400,6 @@ const percentLabel = byId('voice-percent');
 function showSharvardState(message) {
   sharvardState.hidden = false;
   sharvardState.textContent = message;
-}
-
-function discardPiper() {
-  clearTimeout(piperLoadTimer);
-  activePiperVoice = null;
-  piperWorker?.terminate();
-  piperWorker = null;
-  piperReady = false;
-  preparedSpeech = null;
-}
-
-function preparePiper(queue, modelKey) {
-  if (!canUsePiper || piperWorker) return;
-  const text = queue.join(' ');
-  const speed = Number(rate.value);
-  const unavailable = () => {
-    clearTimeout(piperLoadTimer);
-    discardPiper();
-    download.hidden = true;
-    showSharvardState('Piper no disponible.');
-  };
-  try {
-    piperUrl ||= URL.createObjectURL(new Blob([byId('sharvard-worker').textContent], { type: 'text/javascript' }));
-    const worker = new Worker(piperUrl);
-    piperWorker = worker;
-    activePiperVoice = modelKey;
-    progress.removeAttribute('value');
-    percentLabel.textContent = '';
-    download.hidden = false;
-    sharvardState.hidden = true;
-    piperLoadTimer = setTimeout(unavailable, 240000);
-    worker.onerror = unavailable;
-    worker.onmessage = ({ data }) => {
-      if (piperWorker !== worker) return;
-      if (data.error) {
-        console.error(data.error);
-        unavailable();
-      } else if (data.percent !== undefined) {
-        progress.value = data.percent;
-        percentLabel.textContent = data.percent + ' %';
-        if (data.percent === 100) showSharvardState('Preparando la voz…');
-      } else if (data.pcm) {
-        preparedSpeech = { text, speed, data };
-        clearTimeout(piperLoadTimer);
-        piperReady = true;
-        progress.value = 100;
-        percentLabel.textContent = '100 %';
-        showSharvardState(piperLabels[modelKey] + ' lista.');
-        status.textContent = sharvardState.textContent;
-      }
-    };
-    worker.postMessage({ text, speed, modelKey, id: ++nextPiperRequest });
-  } catch (error) {
-    unavailable();
-  }
 }
 
 if (!canUsePiper) showSharvardState('Piper no disponible.');
@@ -1475,28 +1416,51 @@ function stopPiper() {
   }
 }
 
-function speakPiper(queue) {
-  const fallback = () => {
-    if (piperJob !== job) return;
-    stopPiper();
-    speakDevice(queue, 'Piper no está disponible. ');
-  };
+function speakPiper(queue, fallback) {
+  const label = piperLabels.piper;
   const job = { id: ++nextPiperRequest };
-  const text = queue.join(' ');
-  const speed = Number(rate.value);
   piperJob = job;
   stop.disabled = false;
   status.textContent = 'Preparando el audio con Piper…';
+
+  function fail() {
+    if (piperJob !== job) return;
+    stopPiper();
+    piperWorker?.terminate();
+    piperWorker = null;
+    download.hidden = true;
+    stop.disabled = !followSelections;
+    showSharvardState('Piper Sharvard no está disponible.');
+    status.textContent = sharvardState.textContent;
+    if (fallback) fallback();
+  }
+
+  if (!canUsePiper) {
+    fail();
+    return;
+  }
+
   try {
     audioContext ||= new Audio();
     const ready = audioContext.resume();
-    ready.catch(fallback);
-    piperWorker.onerror = fallback;
-    const playPiper = async data => {
+    ready.catch(fail);
+    piperUrl ||= URL.createObjectURL(new Blob([byId('sharvard-worker').textContent], { type:'text/javascript' }));
+    piperWorker ||= new Worker(piperUrl);
+    download.hidden = false;
+    progress.removeAttribute('value');
+    percentLabel.textContent = '';
+    sharvardState.hidden = true;
+    piperWorker.onerror = fail;
+    piperWorker.onmessage = async ({ data }) => {
       if (piperJob !== job) return;
+      if (data.percent !== undefined) {
+        progress.value = data.percent;
+        percentLabel.textContent = data.percent + ' %';
+        return;
+      }
+      if (data.id !== job.id) return;
       if (data.error) {
-        console.error(data.error);
-        fallback();
+        fail();
         return;
       }
       try {
@@ -1512,33 +1476,28 @@ function speakPiper(queue) {
           piperJob = null;
           source.disconnect();
           stop.disabled = !followSelections;
-          status.textContent = 'Lectura finalizada con ' + piperLabels[activePiperVoice] + '.';
+          status.textContent = 'Lectura finalizada con ' + label + '.';
         };
         source.start();
         job.source = source;
         clearTimeout(job.timeout);
-        status.textContent = 'Leyendo con ' + piperLabels[activePiperVoice] + '.';
-      } catch (error) {
-        fallback();
+        download.hidden = true;
+        status.textContent = 'Leyendo con ' + label + '.';
+      } catch {
+        fail();
       }
     };
-    piperWorker.onmessage = ({ data }) => {
-      if (data.id === job.id) playPiper(data);
-    };
-    job.timeout = setTimeout(fallback, 150000);
-    if (preparedSpeech?.text === text && preparedSpeech.speed === speed) {
-      playPiper(preparedSpeech.data);
-    } else {
-      piperWorker.postMessage({ text, speed, modelKey: activePiperVoice, id: job.id });
-    }
-  } catch (error) {
-    fallback();
+    job.timeout = setTimeout(fail, 240000);
+    piperWorker.postMessage({text:queue.join(' '), speed:Number(rate.value), modelKey:'piper', id:job.id});
+  } catch {
+    fail();
   }
 }
 
 function stopReading() {
   const wasReading = Boolean(utterance || piperJob);
   stopPiper();
+  download.hidden = true;
   utterance = null;
   if (wasReading && synth) synth.cancel();
   stop.disabled = !followSelections;
@@ -1681,88 +1640,89 @@ byId('reset').addEventListener('click', () => {
   status.textContent = 'Ajustes restablecidos.';
 });
 
+function deviceVoice() {
+  const spanish = synth?.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang)) || [];
+  const local = spanish.filter(item => item.localService);
+  return local.find(item => item.default)
+    || local.find(item => /^es[-_]ES$/i.test(item.lang))
+    || local[0]
+    || spanish.find(item => item.default);
+}
+
 function loadVoices() {
-  voices = synth.getVoices().filter(item => /^es[-_]ES$/i.test(item.lang))
+  voices = synth.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang))
     .sort((a,b) => a.name.localeCompare(b.name));
-  const google = synth.getVoices().filter(item =>
-    /^es(?:[-_]|$)/i.test(item.lang) && /google/i.test(item.name));
-  googleVoice = google.find(item => /^es[-_]ES$/i.test(item.lang)) || google[0];
-  const automatic = googleVoice || voices.find(item => item.default) || voices[0];
+  const automatic = deviceVoice();
   voice.replaceChildren(
-    new Option('Automática · ' + (googleVoice ? googleVoice.name : 'Piper · Segunda voz'), ''),
+    new Option('Automática · Dispositivo → Piper Sharvard', ''),
     new Option(piperLabels.piper, 'piper'),
     new Option(automatic ? 'Dispositivo · ' + automatic.name : 'Voz automática del dispositivo', 'device')
   );
   voices.forEach(item => voice.add(new Option(item.name + ' · ' + item.lang, item.voiceURI)));
   restoreSelect(voice, preferredVoice);
-  voice.dataset.automatic = automatic?.voiceURI || '';
 }
 if (synth) {
   loadVoices();
   synth.addEventListener('voiceschanged', loadVoices);
 }
-function speakDevice(queue, prefix = '', selectedVoice) {
-    if (!synth) {
-      followSelections = false;
-      stop.disabled = true;
-      status.textContent = prefix + 'El navegador no ofrece lectura con la voz del dispositivo.';
-      return;
-    }
-    const spanishSpain = synth.getVoices().filter(item => /^es[-_]ES$/i.test(item.lang));
-    const selected = selectedVoice || spanishSpain.find(item => item.voiceURI === voice.value)
-      || spanishSpain.find(item => item.voiceURI === voice.dataset.automatic)
-      || spanishSpain.find(item => item.default) || spanishSpain[0];
-    if (!selected) {
+
+function speakDevice(queue, selected, fallback) {
+  function readNext() {
+    if (!queue.length) {
+      utterance = null;
       stop.disabled = !followSelections;
-      status.textContent = prefix + 'El navegador no ofrece una voz de español de España.';
+      status.textContent = 'Lectura finalizada.';
       return;
     }
-    function readNext() {
-      if (!queue.length) {
-        utterance = null;
+    const part = new SpeechSynthesisUtterance(queue[0]);
+    part.lang = selected.lang;
+    part.voice = selected;
+    part.rate = Number(rate.value);
+    utterance = part;
+    part.onend = () => {
+      if (utterance !== part) return;
+      queue.shift();
+      readNext();
+    };
+    part.onerror = () => {
+      if (utterance !== part) return;
+      utterance = null;
+      if (fallback) fallback(queue);
+      else {
         stop.disabled = !followSelections;
-        status.textContent = 'Lectura finalizada.';
-        return;
-      }
-      const part = new SpeechSynthesisUtterance(queue.shift());
-      part.lang = selected.lang;
-      part.voice = selected;
-      part.rate = Number(rate.value);
-      utterance = part;
-      part.onend = () => { if (utterance === part) readNext(); };
-      part.onerror = () => {
-        if (utterance !== part) return;
-        utterance = null;
-        followSelections = false;
-        stop.disabled = true;
         status.textContent = 'No se ha podido reproducir la voz seleccionada.';
-      };
+      }
+    };
+    try {
       synth.speak(part);
+    } catch {
+      part.onerror();
     }
-    stop.disabled = false;
-    status.textContent = prefix + 'Leyendo con la voz del dispositivo.';
-    readNext();
   }
+  stop.disabled = false;
+  status.textContent = 'Leyendo con la voz del dispositivo.';
+  readNext();
+}
 
 function speakQueue(queue) {
   stopReading();
   if (synth && !voice.value) loadVoices();
-  if (!voice.value && googleVoice) {
-    speakDevice(queue, '', googleVoice);
+  if (!voice.value) {
+    const selected = deviceVoice();
+    if (selected) speakDevice(queue, selected, speakPiper);
+    else speakPiper(queue);
     return;
   }
-  const modelKey = voice.value || 'piper';
-  if (!Object.hasOwn(piperLabels, modelKey)) {
-    speakDevice(queue);
+  if (voice.value === 'piper') {
+    speakPiper(queue, () => {
+      const selected = deviceVoice();
+      if (selected) speakDevice(queue, selected);
+    });
     return;
   }
-  if (activePiperVoice && activePiperVoice !== modelKey) discardPiper();
-  if (piperReady) {
-    speakPiper(queue);
-  } else {
-    preparePiper(queue, modelKey);
-    speakDevice(queue, piperWorker ? 'Preparando la voz. ' : 'Piper no está disponible. ');
-  }
+  const selected = synth?.getVoices().find(item => item.voiceURI === voice.value) || deviceVoice();
+  if (selected) speakDevice(queue, selected);
+  else status.textContent = 'El navegador no ofrece una voz del dispositivo en español.';
 }
 
 if (synth || canUsePiper) {
