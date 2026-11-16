@@ -1640,6 +1640,18 @@ byId('reset').addEventListener('click', () => {
   status.textContent = 'Ajustes restablecidos.';
 });
 
+function browserVoiceOrder() {
+  const agent = navigator.userAgent;
+  if (/\b(?:Chrome|CriOS)\//.test(agent) && !/\b(?:Edg|EdgA|EdgiOS|OPR|SamsungBrowser)\//.test(agent)) return 'chrome';
+  if (/\bSafari\//.test(agent) && /\bVersion\//.test(agent) && !/\b(?:Chrome|CriOS|Chromium|FxiOS|EdgiOS|OPiOS)\//.test(agent)) return 'safari';
+  return 'device';
+}
+
+function googleSpanishVoice() {
+  const spanish = synth?.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang) && /google/i.test(item.name)) || [];
+  return spanish.find(item => /^es[-_]ES$/i.test(item.lang)) || spanish[0];
+}
+
 function deviceVoice() {
   const spanish = synth?.getVoices().filter(item => /^es(?:[-_]|$)/i.test(item.lang)) || [];
   const local = spanish.filter(item => item.localService);
@@ -1654,10 +1666,16 @@ function loadVoices() {
     .sort((a,b) => a.name.localeCompare(b.name));
   const automatic = deviceVoice();
   voice.replaceChildren(
-    new Option('Automática · Dispositivo → Piper Sharvard', ''),
+    new Option({
+      chrome:'Automática · Google Español → Dispositivo → Piper',
+      safari:'Automática · Piper → Dispositivo',
+      device:'Automática · Dispositivo → Piper'
+    }[browserVoiceOrder()], ''),
     new Option(piperLabels.piper, 'piper'),
     new Option(automatic ? 'Dispositivo · ' + automatic.name : 'Voz automática del dispositivo', 'device')
   );
+  const google = googleSpanishVoice();
+  if (google && !voices.some(item => item.voiceURI === google.voiceURI)) voices.push(google);
   voices.forEach(item => voice.add(new Option(item.name + ' · ' + item.lang, item.voiceURI)));
   restoreSelect(voice, preferredVoice);
 }
@@ -1708,9 +1726,21 @@ function speakQueue(queue) {
   stopReading();
   if (synth && !voice.value) loadVoices();
   if (!voice.value) {
-    const selected = deviceVoice();
-    if (selected) speakDevice(queue, selected, speakPiper);
-    else speakPiper(queue);
+    const order = browserVoiceOrder();
+    const device = deviceVoice();
+    if (order === 'safari') {
+      speakPiper(queue, device ? () => speakDevice(queue, device) : undefined);
+      return;
+    }
+    const google = order === 'chrome' ? googleSpanishVoice() : undefined;
+    const choices = [google, device].filter((item, index, all) =>
+      item && all.findIndex(candidate => candidate?.voiceURI === item.voiceURI) === index);
+    function tryNext(remaining) {
+      const selected = choices.shift();
+      if (selected) speakDevice(remaining, selected, tryNext);
+      else speakPiper(remaining);
+    }
+    tryNext(queue);
     return;
   }
   if (voice.value === 'piper') {
@@ -1722,7 +1752,8 @@ function speakQueue(queue) {
   }
   const selected = synth?.getVoices().find(item => item.voiceURI === voice.value) || deviceVoice();
   if (selected) speakDevice(queue, selected);
-  else status.textContent = 'El navegador no ofrece una voz del dispositivo en español.';
+  else if (voice.value === 'device') speakPiper(queue);
+  else status.textContent = 'La voz elegida no está disponible.';
 }
 
 if (synth || canUsePiper) {
